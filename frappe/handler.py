@@ -102,11 +102,7 @@ def is_valid_http_method(method):
 	http_method = frappe.local.request.method
 
 	if http_method not in frappe.allowed_http_methods_for_whitelisted_func[method]:
-		throw_permission_error()
-
-
-def throw_permission_error():
-	frappe.throw(_("Not permitted"), frappe.PermissionError)
+		frappe.throw_permission_error()
 
 
 @frappe.whitelist(allow_guest=True)
@@ -122,45 +118,6 @@ def web_logout():
 	frappe.respond_as_web_page(
 		_("Logged Out"), _("You have been successfully logged out"), indicator_color="green"
 	)
-
-
-@frappe.whitelist()
-def uploadfile():
-	ret = None
-	check_write_permission(frappe.form_dict.doctype, frappe.form_dict.docname)
-
-	try:
-		if frappe.form_dict.get("from_form"):
-			try:
-				ret = frappe.get_doc(
-					{
-						"doctype": "File",
-						"attached_to_name": frappe.form_dict.docname,
-						"attached_to_doctype": frappe.form_dict.doctype,
-						"attached_to_field": frappe.form_dict.docfield,
-						"file_url": frappe.form_dict.file_url,
-						"file_name": frappe.form_dict.filename,
-						"is_private": frappe.utils.cint(frappe.form_dict.is_private),
-						"content": frappe.form_dict.filedata,
-						"decode": True,
-					}
-				)
-				ret.save()
-			except frappe.DuplicateEntryError:
-				# ignore pass
-				ret = None
-				frappe.db.rollback()
-		else:
-			if frappe.form_dict.get("method"):
-				method = frappe.get_attr(frappe.form_dict.method)
-				is_whitelisted(method)
-				ret = method()
-	except Exception:
-		frappe.errprint(frappe.utils.get_traceback())
-		frappe.response["http_status_code"] = 500
-		ret = None
-
-	return ret
 
 
 @frappe.whitelist(allow_guest=True)
@@ -216,6 +173,7 @@ def upload_file():
 				args["max_height"] = int(frappe.form_dict.max_height)
 			content = optimize_image(**args)
 
+	frappe.local.uploaded_file_url = file_url
 	frappe.local.uploaded_file = content
 	frappe.local.uploaded_filename = filename
 
@@ -252,7 +210,8 @@ def check_write_permission(doctype: str | None = None, name: str | None = None):
 			doc.check_permission("write")
 		except frappe.DoesNotExistError:
 			# doc has not been inserted yet, name is set to "new-some-doctype"
-			check_doctype = True
+			# If doc inserts fine then only this attachment will be linked see file/utils.py:relink_mismatched_files
+			return
 
 	if check_doctype:
 		frappe.has_permission(doctype, "write", throw=True)
@@ -308,7 +267,7 @@ def run_doc_method(method, docs=None, dt=None, dn=None, arg=None, args=None):
 		doc.check_if_latest()
 
 	if not doc or not doc.has_permission("read"):
-		throw_permission_error()
+		frappe.throw_permission_error()
 
 	try:
 		args = frappe.parse_json(args)

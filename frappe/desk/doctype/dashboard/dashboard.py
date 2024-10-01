@@ -5,10 +5,10 @@ import json
 
 import frappe
 from frappe import _
-from frappe.config import get_modules_from_all_apps_for_user
 from frappe.model.document import Document
 from frappe.modules.export_file import export_to_files
 from frappe.query_builder import DocType
+from frappe.utils.modules import get_modules_from_all_apps_for_user
 
 
 class Dashboard(Document):
@@ -71,19 +71,17 @@ def get_permission_query_conditions(user):
 	if not user:
 		user = frappe.session.user
 
-	if user == "Administrator":
+	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
 		return
 
-	roles = frappe.get_roles(user)
-	if "System Manager" in roles:
-		return None
-
+	module_not_set = " ifnull(`tabDashboard`.`module`, '') = '' "
 	allowed_modules = [
 		frappe.db.escape(module.get("module_name")) for module in get_modules_from_all_apps_for_user()
 	]
-	return "`tabDashboard`.`module` in ({allowed_modules}) or `tabDashboard`.`module` is NULL".format(
-		allowed_modules=",".join(allowed_modules)
-	)
+	if not allowed_modules:
+		return module_not_set
+
+	return f" `tabDashboard`.`module` in ({','.join(allowed_modules)}) or {module_not_set} "
 
 
 @frappe.whitelist()

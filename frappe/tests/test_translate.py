@@ -17,6 +17,7 @@ from frappe.translate import (
 	extract_messages_from_javascript_code,
 	extract_messages_from_python_code,
 	get_language,
+	get_messages_for_app,
 	get_parent_language,
 	get_translation_dict_from_file,
 )
@@ -155,7 +156,7 @@ class TestTranslate(FrappeTestCase):
 		site = frappe.local.site
 		frappe.destroy()
 		_("this shouldn't break")
-		frappe.init(site=site)
+		frappe.init(site)
 		frappe.connect()
 
 	def test_guest_request_language_resolution_with_request_header(self):
@@ -313,6 +314,8 @@ def verify_translation_files(app):
 	for file in translations_dir.glob("*.csv"):
 		lang = file.stem  # basename of file = lang
 		get_translation_dict_from_file(file, lang, app, throw=True)
+
+	get_messages_for_app(app)
 
 
 expected_output = [

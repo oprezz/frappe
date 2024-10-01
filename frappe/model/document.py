@@ -238,7 +238,7 @@ class Document(BaseDocument):
 	def raise_no_permission_to(self, perm_type):
 		"""Raise `frappe.PermissionError`."""
 		frappe.flags.error_message = (
-			_("Insufficient Permission for {0}").format(self.doctype) + f" ({frappe.bold(_(perm_type))})"
+			_("Insufficient Permission for {0}").format(_(self.doctype)) + f" ({frappe.bold(_(perm_type))})"
 		)
 		raise frappe.PermissionError
 
@@ -458,7 +458,7 @@ class Document(BaseDocument):
 			d: Document
 			d.db_update()
 
-	def get_doc_before_save(self) -> "Document":
+	def get_doc_before_save(self) -> "Self":
 		return getattr(self, "_doc_before_save", None)
 
 	def has_value_changed(self, fieldname):
@@ -481,6 +481,16 @@ class Document(BaseDocument):
 			current_value = get_timedelta(current_value)
 
 		return previous_value != current_value
+
+	def get_value_before_save(self, fieldname):
+		"""Returns value of a field before saving
+
+		Note: This function only works in save context like doc.save, doc.submit.
+		"""
+		previous = self.get_doc_before_save()
+		if not previous:
+			return
+		return previous.get(fieldname)
 
 	def set_new_name(self, force=False, set_name=None, set_child_names=True):
 		"""Calls `frappe.naming.set_new_name` for parent and child docs."""
@@ -809,11 +819,12 @@ class Document(BaseDocument):
 
 		self.load_doc_before_save(raise_exception=True)
 
-		self._action = "save"
-		previous = self._doc_before_save
+		if not hasattr(self, "_action"):
+			self._action = "save"
 
+		previous = self._doc_before_save
 		# previous is None for new document insert
-		if not previous:
+		if not previous and self._action != "discard":
 			self.check_docstatus_transition(0)
 			return
 
@@ -825,7 +836,7 @@ class Document(BaseDocument):
 				raise_exception=frappe.TimestampMismatchError,
 			)
 
-		if not self.meta.issingle:
+		if not self.meta.issingle and self._action != "discard":
 			self.check_docstatus_transition(previous.docstatus)
 
 	def check_docstatus_transition(self, to_docstatus):
@@ -1020,7 +1031,7 @@ class Document(BaseDocument):
 			"on_cancel": "Cancel",
 		}
 
-		if not self.flags.in_insert:
+		if not self.flags.in_insert and not self.flags.in_delete:
 			# value change is not applicable in insert
 			event_map["on_change"] = "Value Change"
 
@@ -1057,6 +1068,25 @@ class Document(BaseDocument):
 	def cancel(self):
 		"""Cancel the document. Sets `docstatus` = 2, then saves."""
 		return self._cancel()
+
+	@frappe.whitelist()
+	def discard(self):
+		"""Discard the draft document. Sets `docstatus` = 2 with db_set."""
+		self._action = "discard"
+
+		self.check_if_locked()
+		self.set_user_and_timestamp()
+		self.check_if_latest()
+
+		if not self.docstatus == DocStatus.draft():
+			raise frappe.ValidationError(_("Only draft documents can be discarded"), self.docstatus)
+
+		self.check_permission("write")
+
+		self.run_method("before_discard")
+		self.db_set("docstatus", DocStatus.cancelled())
+		delattr(self, "_action")
+		self.run_method("on_discard")
 
 	@frappe.whitelist()
 	def rename(self, name: str, merge=False, force=False, validate_rename=True):
@@ -1343,12 +1373,6 @@ class Document(BaseDocument):
 	def validate_value(self, fieldname, condition, val2, doc=None, raise_exception=None):
 		"""Check that value of fieldname should be 'condition' val2
 		else throw Exception."""
-		error_condition_map = {
-			"in": _("one of"),
-			"not in": _("none of"),
-			"^": _("beginning with"),
-		}
-
 		if not doc:
 			doc = self
 
@@ -1359,13 +1383,21 @@ class Document(BaseDocument):
 
 		if not compare(val1, condition, val2):
 			label = doc.meta.get_label(fieldname)
-			condition_str = error_condition_map.get(condition, condition)
 			if doc.get("parentfield"):
-				msg = _("Incorrect value in row {0}: {1} must be {2} {3}").format(
-					doc.idx, label, condition_str, val2
-				)
+				msg = _("Incorrect value in row {0}:").format(doc.idx)
 			else:
-				msg = _("Incorrect value: {0} must be {1} {2}").format(label, condition_str, val2)
+				msg = _("Incorrect value:")
+
+			if condition == "in":
+				msg += _("{0} must be one of {1}").format(label, val2)
+			elif condition == "not in":
+				msg += _("{0} must be none of {1}").format(label, val2)
+			elif condition == "^":
+				msg += _("{0} must be beginning with '{1}'").format(label, val2)
+			elif condition == "=":
+				msg += _("{0} must be equal to '{1}'").format(label, val2)
+			else:
+				msg += _("{0} must be {1} {2}").format(label, condition, val2)
 
 			# raise passed exception or True
 			msgprint(msg, raise_exception=raise_exception or True)
@@ -1715,12 +1747,12 @@ def bulk_insert(
 	for child_table in doctype_meta.get_table_fields():
 		valid_column_map[child_table.options] = frappe.get_meta(child_table.options).get_valid_columns()
 		values_map[child_table.options] = _document_values_generator(
-			(
+			[
 				ch_doc
 				for ch_doc in (
 					child_docs for doc in documents for child_docs in doc.get(child_table.fieldname)
 				)
-			),
+			],
 			valid_column_map[child_table.options],
 		)
 

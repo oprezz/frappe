@@ -1,12 +1,11 @@
 # Copyright (c) 2021, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
 """
-	frappe.translate
-	~~~~~~~~~~~~~~~~
+frappe.translate
+~~~~~~~~~~~~~~~~
 
-	Translation tools for frappe
+Translation tools for frappe
 """
-
 
 import functools
 import io
@@ -97,20 +96,14 @@ def get_parent_language(lang: str) -> str:
 def get_user_lang(user: str | None = None) -> str:
 	"""Set frappe.local.lang from user preferences on session beginning or resumption"""
 	user = user or frappe.session.user
-	lang = frappe.cache.hget("lang", user)
 
-	if not lang:
-		# User.language => Session Defaults => frappe.local.lang => 'en'
-		lang = (
-			frappe.db.get_value("User", user, "language")
-			or frappe.db.get_default("lang")
-			or frappe.local.lang
-			or "en"
-		)
-
-		frappe.cache.hset("lang", user, lang)
-
-	return lang
+	# User.language => Session Defaults => frappe.local.lang => 'en'
+	return (
+		frappe.get_cached_value("User", user, "language")
+		or frappe.db.get_default("lang")
+		or frappe.local.lang
+		or "en"
+	)
 
 
 def get_lang_code(lang: str) -> str | None:
@@ -142,7 +135,7 @@ def get_messages_for_boot():
 def get_all_translations(lang: str) -> dict[str, str]:
 	"""Load and return the entire translations dictionary for a language from apps + user translations.
 
-	:param lang: Language Code, e.g. `hi`
+	:param lang: Language Code, e.g. `hi` or `es-CO`
 	"""
 	if not lang:
 		return {}
@@ -150,8 +143,18 @@ def get_all_translations(lang: str) -> dict[str, str]:
 	def _merge_translations():
 		from frappe.geo.country_info import get_translated_countries
 
-		all_translations = get_translations_from_apps(lang).copy()
+		parent_lang = get_parent_language(lang)
+
+		# Get translations for parent language
+		all_translations = get_translations_from_apps(parent_lang).copy() if parent_lang else {}
+
+		# Update with child language translations (overriding parent translations)
+		all_translations.update(get_translations_from_apps(lang))
+
 		with suppress(Exception):
+			# Get translations for parent language
+			all_translations.update(get_user_translations(parent_lang) if parent_lang else {})
+			# Update with child language translations (overriding parent translations)
 			all_translations.update(get_user_translations(lang))
 			all_translations.update(get_translated_countries())
 
@@ -161,7 +164,7 @@ def get_all_translations(lang: str) -> dict[str, str]:
 		return frappe.cache.hget(MERGED_TRANSLATION_KEY, lang, generator=_merge_translations)
 	except Exception:
 		# People mistakenly call translation function on global variables
-		# where locals are not initalized, translations dont make much sense there
+		# where locals are not initialized, translations don't make much sense there
 		frappe.logger().error("Unable to load translations", exc_info=True)
 		return {}
 
@@ -357,7 +360,7 @@ def get_messages_from_workflow(doctype=None, app_name=None):
 	else:
 		fixtures = frappe.get_hooks("fixtures", app_name=app_name) or []
 		for fixture in fixtures:
-			if isinstance(fixture, str) and fixture == "Worflow":
+			if isinstance(fixture, str) and fixture == "Workflow":
 				workflows = frappe.get_all("Workflow")
 				break
 			elif isinstance(fixture, dict) and fixture.get("dt", fixture.get("doctype")) == "Workflow":
@@ -636,11 +639,7 @@ def extract_messages_from_javascript_code(code: str) -> list[tuple[int, str, str
 	messages = []
 	from frappe.gettext.extractors.javascript import extract_javascript
 
-	for message in extract_javascript(
-		code,
-		keywords=["__"],
-		options={},
-	):
+	for message in extract_javascript(code):
 		lineno, _func, args = message
 
 		if not args or not args[0]:
@@ -925,49 +924,6 @@ def get_translations(source_text):
 		fields=["name", "language", "translated_text as translation"],
 		filters={"source_text": source_text},
 	)
-
-
-@frappe.whitelist()
-def get_messages(language, start=0, page_length=100, search_text=""):
-	from frappe.frappeclient import FrappeClient
-
-	translator = FrappeClient(get_translator_url())
-	return translator.post_api("translator.api.get_strings_for_translation", params=locals())
-
-
-@frappe.whitelist()
-def get_source_additional_info(source, language=""):
-	from frappe.frappeclient import FrappeClient
-
-	translator = FrappeClient(get_translator_url())
-	return translator.post_api("translator.api.get_source_additional_info", params=locals())
-
-
-@frappe.whitelist()
-def get_contributions(language):
-	return frappe.get_all(
-		"Translation",
-		fields=["*"],
-		filters={
-			"contributed": 1,
-		},
-	)
-
-
-@frappe.whitelist()
-def get_contribution_status(message_id):
-	from frappe.frappeclient import FrappeClient
-
-	doc = frappe.get_doc("Translation", message_id)
-	translator = FrappeClient(get_translator_url())
-	return translator.get_api(
-		"translator.api.get_contribution_status",
-		params={"translation_id": doc.contribution_docname},
-	)
-
-
-def get_translator_url():
-	return frappe.get_hooks()["translator_url"][0]
 
 
 @frappe.whitelist(allow_guest=True)

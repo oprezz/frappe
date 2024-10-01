@@ -10,7 +10,9 @@ import poplib
 import re
 import ssl
 from contextlib import suppress
+from email.errors import HeaderParseError
 from email.header import decode_header
+from urllib.parse import unquote
 
 import _socket
 import chardet
@@ -43,6 +45,10 @@ poplib._MAXLINE = 1_00_000
 
 THREAD_ID_PATTERN = re.compile(r"(?<=\[)[\w/-]+")
 WORDS_PATTERN = re.compile(r"\w+")
+
+ALTERNATE_CHARSET_MAP = {
+	"windows-874": "cp874",
+}
 
 
 class EmailSizeExceededError(frappe.ValidationError):
@@ -311,6 +317,7 @@ class EmailServer:
 		)
 
 	def make_error_msg(self, uid, msg_num):
+		partial_mail = None
 		traceback = frappe.get_traceback(with_context=True)
 		with suppress(Exception):
 			# retrieve headers
@@ -406,9 +413,9 @@ class Email:
 		_subject = decode_header(self.mail.get("Subject", "No Subject"))
 		self.subject = _subject[0][0] or ""
 
-		if _subject[0][1]:
+		if charset := _subject[0][1]:
 			# Encoding is known by decode_header (might also be unknown-8bit)
-			self.subject = safe_decode(self.subject, _subject[0][1])
+			self.subject = safe_decode(self.subject, charset, ALTERNATE_CHARSET_MAP)
 
 		if isinstance(self.subject, bytes):
 			# Fall back to utf-8 if the charset is unknown or decoding fails
@@ -436,11 +443,19 @@ class Email:
 		self.from_real_name = parse_addr(_from_email)[0] if "@" in _from_email else _from_email
 
 	@staticmethod
-	def decode_email(email):
+	def decode_email(email: bytes | str | None) -> str | None:
 		if not email:
 			return
+		email = frappe.as_unicode(email).replace('"', " ").replace("'", " ")
+		try:
+			parts = decode_header(email)
+		except HeaderParseError:
+			# Fallback: grab just the email addresses
+			emails = re.findall(r"(<.*?>)", email)
+			return ", ".join(emails)
+
 		decoded = ""
-		for part, encoding in decode_header(frappe.as_unicode(email).replace('"', " ").replace("'", " ")):
+		for part, encoding in parts:
 			if encoding:
 				decoded += part.decode(encoding, "replace")
 			else:
@@ -502,11 +517,15 @@ class Email:
 
 	def get_payload(self, part):
 		charset = self.get_charset(part)
-
 		try:
 			return str(part.get_payload(decode=True), str(charset), "ignore")
 		except LookupError:
-			return part.get_payload()
+			try:
+				return str(
+					part.get_payload(decode=True), ALTERNATE_CHARSET_MAP.get(charset, "utf-8"), "ignore"
+				)
+			except Exception:
+				return part.get_payload()
 
 	def get_attachment(self, part):
 		# charset = self.get_charset(part)
@@ -548,7 +567,7 @@ class Email:
 				_file = frappe.get_doc(
 					{
 						"doctype": "File",
-						"file_name": attachment["fname"],
+						"file_name": unquote(attachment["fname"]),
 						"attached_to_doctype": doc.doctype,
 						"attached_to_name": doc.name,
 						"is_private": 1,

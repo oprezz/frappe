@@ -1,6 +1,3 @@
-# This workflow is agnostic to branches. Only maintain on develop branch.
-# To add/remove branches just modify the matrix.
-
 name: Regenerate POT file (translatable strings)
 on:
   schedule:
@@ -9,8 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  regeneratee-pot-file:
-    name: Release
+  regenerate-pot-file:
+    name: Regenerate POT file
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

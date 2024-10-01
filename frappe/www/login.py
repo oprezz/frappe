@@ -1,10 +1,15 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
 
+
+from urllib.parse import urlparse
+
 import frappe
 import frappe.utils
 from frappe import _
+from frappe.apps import get_default_path
 from frappe.auth import LoginManager
+from frappe.core.doctype.navbar_settings.navbar_settings import get_app_logo
 from frappe.rate_limiter import rate_limit
 from frappe.utils import cint, get_url
 from frappe.utils.data import escape_html
@@ -19,13 +24,14 @@ no_cache = True
 
 def get_context(context):
 	redirect_to = frappe.local.request.args.get("redirect-to")
+	redirect_to = sanitize_redirect(redirect_to)
 
 	if frappe.session.user != "Guest":
 		if not redirect_to:
 			if frappe.session.data.user_type == "Website User":
-				redirect_to = get_home_page()
+				redirect_to = get_default_path() or get_home_page()
 			else:
-				redirect_to = "/app"
+				redirect_to = get_default_path() or "/app"
 
 		if redirect_to != "login":
 			frappe.local.flags.redirect_location = redirect_to
@@ -39,7 +45,7 @@ def get_context(context):
 	context["disable_signup"] = cint(frappe.get_website_settings("disable_signup"))
 	context["show_footer_on_login"] = cint(frappe.get_website_settings("show_footer_on_login"))
 	context["disable_user_pass_login"] = cint(frappe.get_system_settings("disable_user_pass_login"))
-	context["logo"] = frappe.get_website_settings("app_logo") or frappe.get_hooks("app_logo_url")[-1]
+	context["logo"] = get_app_logo()
 	context["app_name"] = (
 		frappe.get_website_settings("app_name") or frappe.get_system_settings("app_name") or _("Frappe")
 	)
@@ -167,7 +173,6 @@ def login_via_key(key: str):
 
 	if email:
 		frappe.cache.delete_value(cache_key)
-
 		frappe.local.login_manager.login_as(email)
 
 		redirect_post_login(
@@ -180,3 +185,24 @@ def login_via_key(key: str):
 			http_status_code=403,
 			indicator_color="red",
 		)
+
+
+def sanitize_redirect(redirect: str | None) -> str | None:
+	"""Only allow redirect on same domain.
+
+	Allowed redirects:
+	- Same host e.g. https://frappe.localhost/path
+	- Just path e.g. /app
+	"""
+	if not redirect:
+		return redirect
+
+	parsed_redirect = urlparse(redirect)
+	if not parsed_redirect.netloc:
+		return redirect
+
+	parsed_request_host = urlparse(frappe.local.request.url)
+	if parsed_request_host.netloc == parsed_redirect.netloc:
+		return redirect
+
+	return None

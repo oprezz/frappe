@@ -95,11 +95,10 @@ export default class GridRow {
 	remove() {
 		var me = this;
 		if (this.grid.is_editable()) {
+			if (this.get_open_form()) {
+				this.hide_form();
+			}
 			if (this.frm) {
-				if (this.get_open_form()) {
-					this.hide_form();
-				}
-
 				frappe
 					.run_serially([
 						() => {
@@ -176,6 +175,7 @@ export default class GridRow {
 				// renumber and refresh
 				let data = me.grid.get_data();
 				data.move(me.doc.idx - 1, values.move_to - 1);
+				me.frm.dirty();
 
 				// renum idx
 				for (let i = 0; i < data.length; i++) {
@@ -839,10 +839,12 @@ export default class GridRow {
 					delete this.grid.filter[df.fieldname];
 				}
 
-				this.grid.grid_sortable.option(
-					"disabled",
-					Object.keys(this.grid.filter).length !== 0
-				);
+				if (this.grid.grid_sortable) {
+					this.grid.grid_sortable.option(
+						"disabled",
+						Object.keys(this.grid.filter).length !== 0
+					);
+				}
 
 				this.grid.prevent_build = true;
 				this.grid.grid_pagination.go_to_page(1);
@@ -1099,12 +1101,6 @@ export default class GridRow {
 		var me = this,
 			parent = column.field_area,
 			df = column.df;
-
-		// no text editor in grid
-		if (df.fieldtype == "Text Editor") {
-			df = Object.assign({}, df);
-			df.fieldtype = "Text";
-		}
 
 		var field = frappe.ui.form.make_control({
 			df: df,
@@ -1447,7 +1443,9 @@ export default class GridRow {
 		let field = this.on_grid_fields_dict[fieldname];
 		// reset field value
 		if (field) {
-			field.docname = this.doc.name;
+			// the below if statement is added to factor in the exception when this.doc is undefined -
+			// - after row removals via customize_form.js on links, actions and states child-tables
+			if (this.doc) field.docname = this.doc.name;
 			field.refresh();
 		}
 

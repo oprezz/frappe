@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from contextlib import suppress
 from functools import lru_cache
+from threading import Thread
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -162,7 +163,7 @@ def enqueue(
 
 	def enqueue_call():
 		return q.enqueue_call(
-			execute_job,
+			"frappe.utils.background_jobs.execute_job",
 			on_success=Callback(func=on_success) if on_success else None,
 			on_failure=Callback(func=on_failure) if on_failure else None,
 			timeout=timeout,
@@ -203,7 +204,7 @@ def execute_job(site, method, event, job_name, kwargs, user=None, is_async=True,
 	retval = None
 
 	if is_async:
-		frappe.init(site=site)
+		frappe.init(site)
 		frappe.connect()
 		if os.environ.get("CI"):
 			frappe.flags.in_test = True
@@ -283,7 +284,7 @@ def start_worker(
 	rq_password: str | None = None,
 	burst: bool = False,
 	strategy: DequeueStrategy | None = DequeueStrategy.DEFAULT,
-) -> None:  # pragma: no cover
+) -> NoReturn:  # pragma: no cover
 	"""Wrapper to start rq worker. Connects to redis and monitors these queues."""
 
 	if not strategy:
@@ -319,6 +320,23 @@ def start_worker(
 	)
 
 
+class FrappeWorker(Worker):
+	def work(self, *args, **kwargs):
+		self.start_frappe_scheduler()
+		kwargs["with_scheduler"] = False  # Always disable RQ scheduler
+		return super().work(*args, **kwargs)
+
+	def run_maintenance_tasks(self, *args, **kwargs):
+		"""Attempt to start a scheduler in case the worker doing scheduling died."""
+		self.start_frappe_scheduler()
+		return super().run_maintenance_tasks(*args, **kwargs)
+
+	def start_frappe_scheduler(self):
+		from frappe.utils.scheduler import start_scheduler
+
+		Thread(target=start_scheduler, daemon=True).start()
+
+
 def start_worker_pool(
 	queue: str | None = None,
 	num_workers: int = 1,
@@ -335,8 +353,9 @@ def start_worker_pool(
 	# If gc.freeze is done then importing modules before forking allows us to share the memory
 	import frappe.database.query  # sqlparse and indirect imports
 	import frappe.query_builder  # pypika
-	import frappe.utils.data  # common utils
+	import frappe.utils  # common utils
 	import frappe.utils.safe_exec
+	import frappe.utils.scheduler
 	import frappe.utils.typing_validations  # any whitelisted method uses this
 	import frappe.website.path_resolver  # all the page types and resolver
 
@@ -363,6 +382,7 @@ def start_worker_pool(
 		queues=queues,
 		connection=redis_connection,
 		num_workers=num_workers,
+		worker_class=FrappeWorker,  # Auto starts scheduler with workerpool
 	)
 	pool.start(logging_level=logging_level, burst=burst)
 

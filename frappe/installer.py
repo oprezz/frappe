@@ -25,7 +25,7 @@ from frappe.utils.synchronization import filelock
 def _is_scheduler_enabled(site) -> bool:
 	enable_scheduler = False
 	try:
-		frappe.init(site=site)
+		frappe.init(site)
 		frappe.connect()
 		enable_scheduler = cint(frappe.db.get_single_value("System Settings", "enable_scheduler"))
 	except Exception:
@@ -64,7 +64,7 @@ def _new_site(
 		print(f"Site {site} already exists, use `--force` to proceed anyway")
 		sys.exit(1)
 
-	frappe.init(site=site)
+	frappe.init(site)
 
 	if not db_name:
 		db_name = f"_{frappe.generate_hash(length=16)}"
@@ -99,7 +99,7 @@ def _new_site(
 			mariadb_user_host_login_scope=mariadb_user_host_login_scope,
 		)
 
-		apps_to_install = ["frappe"] + (frappe.conf.get("install_apps") or []) + (list(install_apps) or [])
+		apps_to_install = ["frappe"] + (frappe.conf.get("install_apps") or []) + (list(install_apps or []))
 
 		for app in apps_to_install:
 			# NOTE: not using force here for 2 reasons:
@@ -753,7 +753,7 @@ def extract_files(site_name, file_path):
 	file_path = get_bench_relative_path(file_path)
 
 	# Need to do frappe.init to maintain the site locals
-	frappe.init(site=site_name)
+	frappe.init(site_name)
 	abs_site_path = os.path.abspath(frappe.get_site_path())
 
 	# Copy the files to the parent directory and extract
@@ -807,9 +807,8 @@ def get_old_backup_version(sql_file_path: str) -> Version | None:
 	"""
 	header = get_db_dump_header(sql_file_path).split("\n")
 	if match := re.search(r"Frappe (\d+\.\d+\.\d+)", header[0]):
-		backup_version = match[1]
-
-	return Version(backup_version) if backup_version else None
+		return Version(match[1])
+	return None
 
 
 def get_backup_version(sql_file_path: str) -> Version | None:

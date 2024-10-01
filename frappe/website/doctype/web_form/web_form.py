@@ -43,6 +43,8 @@ class WebForm(WebsiteGenerator):
 		condition_json: DF.JSON | None
 		custom_css: DF.Code | None
 		doc_type: DF.Link
+		hide_footer: DF.Check
+		hide_navbar: DF.Check
 		introduction_text: DF.TextEditor | None
 		is_standard: DF.Check
 		list_columns: DF.Table[WebFormListColumn]
@@ -256,7 +258,7 @@ def get_context(context):
 			description = self.introduction_text[:140]
 
 		context.metatags = {
-			"name": self.meta_title or self.title,
+			"title": self.meta_title or self.title,
 			"description": description,
 			"image": self.meta_image,
 		}
@@ -664,7 +666,7 @@ def get_link_options(web_form_name, doctype, allow_read_on_all_link_options=Fals
 		)
 
 	link_options, filters = [], {}
-	if not allow_read_on_all_link_options:
+	if web_form.login_required and not allow_read_on_all_link_options:
 		filters = {"owner": frappe.session.user}
 
 	fields = ["name as value"]

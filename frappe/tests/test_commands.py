@@ -95,7 +95,7 @@ def maintain_locals():
 	finally:
 		post_site = getattr(frappe.local, "site", None)
 		if not post_site or post_site != pre_site:
-			frappe.init(site=pre_site)
+			frappe.init(pre_site)
 			frappe.local.db = pre_db
 			frappe.local.flags.update(pre_flags)
 
@@ -224,18 +224,23 @@ class TestCommands(BaseTestCommands):
 		self.assertEqual(self.returncode, 0)
 		self.assertIsInstance(float(self.stdout), float)
 
-		# test 2: execute a command expecting an errored output as local won't exist
+		# test 2: execute a command accessing a normal attribute
 		self.execute("bench --site {site} execute frappe.local.site")
+		self.assertEqual(self.returncode, 0)
+		self.assertIsNotNone(self.stderr)
+
+		# test 3: execute a command expecting an errored output as lacol won't exist
+		self.execute("bench --site {site} execute frappe.lacol.site")
 		self.assertEqual(self.returncode, 1)
 		self.assertIsNotNone(self.stderr)
 
-		# test 3: execute a command with kwargs
-		# Note:
-		# terminal command has been escaped to avoid .format string replacement
-		# The returned value has quotes which have been trimmed for the test
-		self.execute("""bench --site {site} execute frappe.bold --kwargs '{{"text": "DocType"}}'""")
+		# test 4: execute a command with kwargs
+		self.execute(
+			"bench --site {site} execute frappe.bold --kwargs '{put_here}'",
+			{"put_here": '{"text": "DocType"}'},  # avoid escaping errors
+		)
 		self.assertEqual(self.returncode, 0)
-		self.assertEqual(self.stdout[1:-1], frappe.bold(text="DocType"))
+		self.assertEqual(self.stdout, frappe.bold(text="DocType"))
 
 	@run_only_if(db_type_is.MARIADB)
 	def test_restore(self):
@@ -892,12 +897,12 @@ class TestAddNewUser(BaseTestCommands):
 
 class TestBenchBuild(BaseTestCommands):
 	def test_build_assets_size_check(self):
-		with cli(frappe.commands.utils.build, "--force --production") as result:
+		with cli(frappe.commands.utils.build, "--force --production --app frappe") as result:
 			self.assertEqual(result.exit_code, 0)
 			self.assertEqual(result.exception, None)
 
-		CURRENT_SIZE = 3.5  # MB
-		JS_ASSET_THRESHOLD = 0.1
+		CURRENT_SIZE = 3.3  # MB
+		JS_ASSET_THRESHOLD = 0.01
 
 		hooks = frappe.get_hooks()
 		default_bundle = hooks["app_include_js"]
@@ -924,15 +929,6 @@ class TestDBUtils(BaseTestCommands):
 		self.assertTrue(frappe.db.has_index("tabUser", index_name))
 		meta = frappe.get_meta("User", cached=False)
 		self.assertTrue(meta.get_field(field).search_index)
-
-	@run_only_if(db_type_is.MARIADB)
-	def test_describe_table(self):
-		self.execute("bench --site {site} describe-database-table --doctype User", {})
-		self.assertIn("user_type", self.stdout)
-
-		# Ensure that output is machine parseable
-		stats = json.loads(self.stdout)
-		self.assertIn("total_rows", stats)
 
 
 class TestSchedulerUtils(BaseTestCommands):

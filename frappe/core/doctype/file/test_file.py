@@ -1,7 +1,6 @@
 # Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
 import base64
-import json
 import os
 import shutil
 import tempfile
@@ -18,7 +17,7 @@ from frappe.core.api.file import (
 	unzip_file,
 )
 from frappe.core.doctype.file.exceptions import FileTypeNotAllowed
-from frappe.core.doctype.file.utils import get_extension
+from frappe.core.doctype.file.utils import get_corrupted_image_msg, get_extension
 from frappe.desk.form.utils import add_comment
 from frappe.exceptions import ValidationError
 from frappe.tests.utils import FrappeTestCase, change_settings
@@ -111,7 +110,7 @@ class TestBase64File(FrappeTestCase):
 	def setUp(self):
 		self.attached_to_doctype, self.attached_to_docname = make_test_doc()
 		self.test_content = base64.b64encode(test_content1.encode("utf-8"))
-		_file: "File" = frappe.get_doc(
+		_file: frappe.Document = frappe.get_doc(
 			{
 				"doctype": "File",
 				"file_name": "test_base64.txt",
@@ -125,7 +124,7 @@ class TestBase64File(FrappeTestCase):
 		self.saved_file_url = _file.file_url
 
 	def test_saved_content(self):
-		_file = frappe.get_doc("File", {"file_url": self.saved_file_url})
+		_file: frappe.Document = frappe.get_doc("File", {"file_url": self.saved_file_url})
 		content = _file.get_content()
 		self.assertEqual(content, test_content1)
 
@@ -254,6 +253,25 @@ class TestSameContent(FrappeTestCase):
 		self.assertRaises(frappe.exceptions.AttachmentLimitReached, file2.insert)
 		limit_property.delete()
 		frappe.clear_cache(doctype="ToDo")
+
+	def test_utf8_bom_content_decoding(self):
+		utf8_bom_content = test_content1.encode("utf-8-sig")
+		_file: frappe.Document = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": "utf8bom.txt",
+				"attached_to_doctype": self.attached_to_doctype1,
+				"attached_to_name": self.attached_to_docname1,
+				"content": utf8_bom_content,
+				"decode": False,
+			}
+		)
+		_file.save()
+		saved_file = frappe.get_doc("File", _file.name)
+		file_content_decoded = saved_file.get_content(encodings=["utf-8"])
+		self.assertEqual(file_content_decoded[0], "\ufeff")
+		file_content_properly_decoded = saved_file.get_content(encodings=["utf-8-sig", "utf-8"])
+		self.assertEqual(file_content_properly_decoded, test_content1)
 
 
 class TestFile(FrappeTestCase):
@@ -750,6 +768,25 @@ class TestFileUtils(FrappeTestCase):
 		)
 		self.assertRegex(communication.content, r"<img src=\"(.*)/files/pix\.png(.*)\">")
 
+	def test_broken_image(self):
+		"""Ensure that broken inline images don't cause errors."""
+		is_private = not frappe.get_meta("Communication").make_attachments_public
+		communication = frappe.get_doc(
+			doctype="Communication",
+			communication_type="Communication",
+			communication_medium="Email",
+			content='<div class="ql-editor read-mode"><img src="data:image/png;filename=pix.png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CY="></div>',
+			recipients="to <to@test.com>",
+			cc=None,
+			bcc=None,
+			sender="sender@test.com",
+		).insert(ignore_permissions=True)
+
+		self.assertFalse(
+			frappe.db.exists("File", {"attached_to_name": communication.name, "is_private": is_private})
+		)
+		self.assertIn(f'<img src="#broken-image" alt="{get_corrupted_image_msg()}">', communication.content)
+
 	def test_create_new_folder(self):
 		folder = create_new_folder("test_folder", "Home")
 		self.assertTrue(folder.is_folder)
@@ -883,3 +920,41 @@ class TestGuestFileAndAttachments(FrappeTestCase):
 		).insert(ignore_permissions=True)
 
 		self.assertFalse(file.is_downloadable())
+
+	def test_private_remains_private_even_if_same_hash(self):
+		file_name = "test" + frappe.generate_hash()
+		content = file_name.encode()
+
+		doc_pub: "File" = frappe.new_doc("File")  # type: ignore
+		doc_pub.file_url = f"/files/{file_name}.txt"
+		doc_pub.content = content
+		doc_pub.save()
+
+		doc_pri: "File" = frappe.new_doc("File")  # type: ignore
+		doc_pri.file_url = f"/private/files/{file_name}.txt"
+		doc_pri.is_private = False
+		doc_pri.content = content
+		doc_pri.save()
+
+		doc_pub.reload()
+		doc_pri.reload()
+
+		self.assertEqual(doc_pub.is_private, 0)
+		self.assertEqual(doc_pri.is_private, 1)
+
+		self.assertEqual(doc_pub.file_url, f"/files/{file_name}.txt")
+		self.assertEqual(doc_pri.file_url, f"/private/files/{file_name}.txt")
+
+		self.assertEqual(doc_pub.get_content(), content)
+		self.assertEqual(doc_pri.get_content(), content)
+
+		# Deleting a public File should not delete the private File's disk file
+		doc_pub.delete()
+		self.assertTrue(os.path.exists(doc_pri.get_full_path()))
+
+		# TODO: Migrate existing Files that have a mismatch between `is_private` and `file_url` prefix?
+		# self.assertFalse(os.path.exists(doc_pub.get_full_path()))
+
+		self.assertEqual(doc_pri.get_content(), content)
+		doc_pri.delete()
+		self.assertFalse(os.path.exists(doc_pri.get_full_path()))

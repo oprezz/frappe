@@ -20,6 +20,7 @@ import json
 import os
 import re
 import signal
+import sys
 import traceback
 import warnings
 from collections.abc import Callable
@@ -421,7 +422,7 @@ def get_site_config(sites_path: str | None = None, site_path: str | None = None)
 		from frappe.database.mariadb.database import MariaDBDatabase
 
 		return {
-			"mariadb": MariaDBDatabase.default_port,  # 3306
+			"mariadb": MariaDBDatabase.default_port,
 			"postgres": 5432,
 		}[db_type]
 
@@ -434,12 +435,18 @@ def get_site_config(sites_path: str | None = None, site_path: str | None = None)
 	config["db_type"] = os.environ.get("FRAPPE_DB_TYPE") or config.get("db_type") or "mariadb"
 	config["db_socket"] = os.environ.get("FRAPPE_DB_SOCKET") or config.get("db_socket")
 	config["db_host"] = os.environ.get("FRAPPE_DB_HOST") or config.get("db_host") or "127.0.0.1"
-	config["db_port"] = (
+	config["db_port"] = int(
 		os.environ.get("FRAPPE_DB_PORT") or config.get("db_port") or db_default_ports(config["db_type"])
 	)
 
 	# Set the user as database name if not set in config
 	config["db_user"] = os.environ.get("FRAPPE_DB_USER") or config.get("db_user") or config.get("db_name")
+
+	# vice versa for dbname if not defined
+	config["db_name"] = os.environ.get("FRAPPE_DB_NAME") or config.get("db_name") or config["db_user"]
+
+	# read password
+	config["db_password"] = os.environ.get("FRAPPE_DB_PASSWORD") or config.get("db_password")
 
 	# Allow externally extending the config with hooks
 	if extra_config := config.get("extra_config"):
@@ -541,9 +548,7 @@ def log(msg: str) -> None:
 	"""Add to `debug_log`
 
 	:param msg: Message."""
-	if not request:
-		print(repr(msg))
-
+	print(msg, file=sys.stderr)
 	debug_log.append(as_unicode(msg))
 
 
@@ -583,7 +588,6 @@ def msgprint(
 	:param realtime: Publish message immediately using websocket.
 	"""
 	import inspect
-	import sys
 
 	msg = safe_decode(msg)
 	out = _dict(message=msg)
@@ -648,6 +652,10 @@ def msgprint(
 	_raise_exception()
 
 
+def toast(message: str, indicator: Literal["blue", "green", "orange", "red", "yellow"] | None = None):
+	frappe.msgprint(message, indicator=indicator, alert=True)
+
+
 def clear_messages():
 	local.message_log = []
 
@@ -690,6 +698,10 @@ def throw(
 		as_list=as_list,
 		primary_action=primary_action,
 	)
+
+
+def throw_permission_error():
+	throw(_("Not permitted"), PermissionError)
 
 
 def create_folder(path, with_init=False):
@@ -935,7 +947,7 @@ def is_whitelisted(method):
 		summary = _("You are not permitted to access this resource.")
 		detail = _("Function {0} is not whitelisted.").format(bold(f"{method.__module__}.{method.__name__}"))
 		msg = f"<details><summary>{summary}</summary>{detail}</details>"
-		throw(msg, PermissionError, title="Method Not Allowed")
+		throw(msg, PermissionError, title=_("Method Not Allowed"))
 
 	if is_guest and method not in xss_safe_methods:
 		# strictly sanitize form_dict
@@ -1051,7 +1063,11 @@ def clear_cache(user: str | None = None, doctype: str | None = None):
 		frappe.cache_manager.clear_user_cache(user)
 	else:  # everything
 		# Delete ALL keys associated with this site.
-		frappe.cache.delete_keys("")
+		keys_to_delete = set(frappe.cache.get_keys(""))
+		for key in frappe.get_hooks("persistent_cache_keys"):
+			keys_to_delete.difference_update(frappe.cache.get_keys(key))
+		frappe.cache.delete_value(list(keys_to_delete), make_keys=False)
+
 		reset_metadata_version()
 		local.cache = {}
 		local.new_doc_templates = {}
@@ -1715,34 +1731,37 @@ def setup_module_map(include_all_apps: bool = True) -> None:
 	"""
 	if include_all_apps:
 		local.app_modules = cache.get_value("app_modules")
-		local.module_app = cache.get_value("module_app")
 	else:
 		local.app_modules = cache.get_value("installed_app_modules")
-		local.module_app = cache.get_value("module_installed_app")
 
-	if not (local.app_modules and local.module_app):
-		local.module_app, local.app_modules = {}, {}
+	if not local.app_modules:
+		local.app_modules = {}
 		if include_all_apps:
 			apps = get_all_apps(with_internal_apps=True)
 		else:
 			apps = get_installed_apps(_ensure_on_bench=True)
+
 		for app in apps:
 			local.app_modules.setdefault(app, [])
 			for module in get_module_list(app):
 				module = scrub(module)
-				if module in local.module_app:
-					print(
-						f"WARNING: module `{module}` found in apps `{local.module_app[module]}` and `{app}`"
-					)
-				local.module_app[module] = app
 				local.app_modules[app].append(module)
 
 		if include_all_apps:
 			cache.set_value("app_modules", local.app_modules)
-			cache.set_value("module_app", local.module_app)
 		else:
 			cache.set_value("installed_app_modules", local.app_modules)
-			cache.set_value("module_installed_app", local.module_app)
+
+	# Init module_app (reverse mapping)
+	local.module_app = {}
+	for app, modules in local.app_modules.items():
+		for module in modules:
+			if module in local.module_app:
+				warnings.warn(
+					f"WARNING: module `{module}` found in apps `{local.module_app[module]}` and `{app}`",
+					stacklevel=1,
+				)
+			local.module_app[module] = app
 
 
 def get_file_items(path, raise_not_found=False, ignore_empty_lines=True):
@@ -2392,8 +2411,11 @@ def logger(module=None, with_more_info=False, allow_site=True, filter=None, max_
 
 
 def get_desk_link(doctype, name):
-	html = '<a href="/app/Form/{doctype}/{name}" style="font-weight: bold;">{doctype_local} {name}</a>'
-	return html.format(doctype=doctype, name=name, doctype_local=_(doctype))
+	meta = get_meta(doctype)
+	title = get_value(doctype, name, meta.get_title_field())
+
+	html = '<a href="/app/Form/{doctype}/{name}" style="font-weight: bold;">{doctype_local} {title_local}</a>'
+	return html.format(doctype=doctype, name=name, doctype_local=_(doctype), title_local=_(title))
 
 
 def bold(text: str) -> str:
@@ -2501,9 +2523,22 @@ def safe_encode(param, encoding="utf-8"):
 	return param
 
 
-def safe_decode(param, encoding="utf-8"):
+def safe_decode(param, encoding="utf-8", fallback_map: dict | None = None):
+	"""
+	Method to safely decode data into a string
+
+	:param param: The data to be decoded
+	:param encoding: The encoding to decode into
+	:param fallback_map: A fallback map to reference in case of a LookupError
+	:return:
+	"""
 	try:
 		param = param.decode(encoding)
+	except LookupError:
+		try:
+			param = param.decode((fallback_map or {}).get(encoding, "utf-8"))
+		except Exception:
+			pass
 	except Exception:
 		pass
 	return param
@@ -2551,7 +2586,11 @@ def validate_and_sanitize_search_inputs(fn):
 
 
 def _register_fault_handler():
-	faulthandler.register(signal.SIGUSR1)
+	import io
+
+	# Some libraries monkey patch stderr, we need actual fd
+	if isinstance(sys.__stderr__, io.TextIOWrapper):
+		faulthandler.register(signal.SIGUSR1, file=sys.__stderr__)
 
 
 from frappe.utils.error import log_error

@@ -2,6 +2,7 @@ import hashlib
 import mimetypes
 import os
 import re
+from binascii import Error as BinasciiError
 from io import BytesIO
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import unquote
@@ -12,7 +13,6 @@ import frappe
 from frappe import _, safe_decode
 from frappe.utils import cint, cstr, encode, get_files_path, random_string, strip
 from frappe.utils.file_manager import safe_b64decode
-from frappe.utils.image import optimize_image
 
 if TYPE_CHECKING:
 	from PIL.ImageFile import ImageFile
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 def make_home_folder() -> None:
 	home = frappe.get_doc(
-		{"doctype": "File", "is_folder": 1, "is_home_folder": 1, "file_name": _("Home")}
+		{"doctype": "File", "is_folder": 1, "is_home_folder": 1, "file_name": "Home"}
 	).insert(ignore_if_duplicate=True)
 
 	frappe.get_doc(
@@ -34,7 +34,7 @@ def make_home_folder() -> None:
 			"folder": home.name,
 			"is_folder": 1,
 			"is_attachments_folder": 1,
-			"file_name": _("Attachments"),
+			"file_name": "Attachments",
 		}
 	).insert(ignore_if_duplicate=True)
 
@@ -216,9 +216,11 @@ def get_file_name(fname: str, optional_suffix: str | None = None) -> str:
 	return f"{partial}{suffix}{extn}"
 
 
-def extract_images_from_doc(doc: "Document", fieldname: str):
+def extract_images_from_doc(doc: "Document", fieldname: str, is_private=True):
 	content = doc.get(fieldname)
-	content = extract_images_from_html(doc, content, is_private=(not doc.meta.make_attachments_public))
+	if doc.meta.make_attachments_public:
+		is_private = False
+	content = extract_images_from_html(doc, content, is_private=is_private)
 	if frappe.flags.has_dataurl:
 		doc.set(fieldname, content)
 
@@ -235,9 +237,12 @@ def extract_images_from_html(doc: "Document", content: str, is_private: bool = F
 			content = content.encode("utf-8")
 		if b"," in content:
 			content = content.split(b",")[1]
-		content = safe_b64decode(content)
 
-		content = optimize_image(content, mtype)
+		try:
+			content = safe_b64decode(content)
+		except BinasciiError:
+			frappe.flags.has_dataurl = True
+			return f'<img src="#broken-image" alt="{get_corrupted_image_msg()}"'
 
 		if "filename=" in headers:
 			filename = headers.split("filename=")[-1]
@@ -274,6 +279,10 @@ def extract_images_from_html(doc: "Document", content: str, is_private: bool = F
 		content = re.sub(r'<img[^>]*src\s*=\s*["\'](?=data:)(.*?)["\']', _save_file, content)
 
 	return content
+
+
+def get_corrupted_image_msg():
+	return _("Image: Corrupted Data Stream")
 
 
 def get_random_filename(content_type: str | None = None) -> str:
@@ -361,15 +370,15 @@ def attach_files_to_document(doc: "Document", event) -> None:
 
 
 def relink_files(doc, fieldname, temp_doc_name):
-	if not temp_doc_name:
-		return
-	from frappe.utils.data import add_to_date, now_datetime
-
 	"""
 	Relink files attached to incorrect document name to the new document name
 	by check if file with temp name exists that was created in last 60 minutes
 	"""
-	mislinked_file = frappe.db.exists(
+	if not temp_doc_name:
+		return
+	from frappe.utils.data import add_to_date, now_datetime
+
+	mislinked_file = frappe.db.get_value(
 		"File",
 		{
 			"file_url": doc.get(fieldname),
@@ -382,7 +391,7 @@ def relink_files(doc, fieldname, temp_doc_name):
 			),
 		},
 	)
-	"""If file exists, attach it to the new docname"""
+	# If file exists, attach it to the new docname
 	if mislinked_file:
 		frappe.db.set_value(
 			"File",
